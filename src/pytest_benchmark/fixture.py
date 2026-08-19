@@ -18,6 +18,7 @@ from .timers import compute_timer_precision
 from .utils import NameWrapper
 from .utils import format_time
 from .utils import slugify
+from .utils import t_quantile
 
 statistics: typing.Any
 statistics_error: str | None = None
@@ -61,6 +62,10 @@ class PauseInstrumentation:
 
 class BenchmarkFixture:
     _precisions: typing.ClassVar[dict[str, float]] = {}
+
+    PRECISION_MIN_BATCHES = 20
+    PRECISION_MAX_BATCHES = 40
+    PRECISION_CONFIRMATIONS = 2
 
     def __init__(
         self,
@@ -109,6 +114,7 @@ class BenchmarkFixture:
         else:
             self._confidence = None
             self._precision = None
+        self._precision_result = None
         self._add_stats = add_stats
         self._calibration_precision = calibration_precision
         self._warmup = warmup and warmup_iterations
@@ -262,33 +268,77 @@ class BenchmarkFixture:
             function_result = function_to_benchmark(*args, **kwargs)
         return function_result
 
-    def _run_until_precise(self, runner, loops_range, stats, max_rounds):
-        # Two-sided normal quantile (good enough for us).
-        z = statistics.NormalDist().inv_cdf(0.5 + self._confidence / 2)
-        precision = self._precision
+    def _record_precision(self, stats, rel_margin, batch_size, converged):
+        # the stats object carries this into the reports and the saved json
+        self._precision_result = stats.precision = {
+            'target': self._precision,
+            'confidence': self._confidence,
+            'achieved': rel_margin,
+            'converged': converged,
+            'batch_size': batch_size,
+        }
 
-        # Welford's online variance algorithm,
-        # see https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-        mean = 0.0
-        m2 = 0.0
+    def _run_until_precise(self, runner, loops_range, stats, max_rounds):
+        precision = self._precision
+        p = 0.5 + self._confidence / 2
+
+        batch_means = []
+        batch_size = 1
+        batch_sum = 0.0
+        batch_rounds = 0
+        confirmations = 0
+        n = 0
+        rel_margin = None
 
         for n in range(1, max_rounds + 1):
             duration = runner(loops_range)
             stats.update(duration)
 
-            delta = duration - mean
-            mean += delta / n
-            m2 += delta * (duration - mean)
+            batch_sum += duration
+            batch_rounds += 1
+            if batch_rounds < batch_size:
+                continue
+            batch_means.append(batch_sum / batch_size)
+            batch_sum = 0.0
+            batch_rounds = 0
 
-            if n >= self._min_rounds and n >= 2 and mean > 0:
-                stddev = sqrt(m2 / (n - 1))
-                rel_margin = z * stddev / sqrt(n) / mean
-                if rel_margin <= precision:
-                    self._logger.debug(
-                        f'  Reached precision ±{rel_margin:.2%} (target ±{precision:.2%}) after {n} rounds.',
-                        yellow=True,
-                    )
-                    return
+            if len(batch_means) >= self.PRECISION_MAX_BATCHES:
+                # merge neighbours pairwise, which doubles the batch size and halves the
+                # count, so the batches keep growing without us holding onto every round
+                batch_means = [(a + b) / 2 for a, b in zip(batch_means[::2], batch_means[1::2])]
+                batch_size *= 2
+
+            batches = len(batch_means)
+            if batches < self.PRECISION_MIN_BATCHES or n < self._min_rounds:
+                continue
+            mean = statistics.fmean(batch_means)
+            if mean <= 0:
+                continue
+            stddev = statistics.stdev(batch_means, mean)
+            rel_margin = t_quantile(p, batches - 1) * stddev / sqrt(batches) / mean
+            if rel_margin > precision:
+                confirmations = 0
+                continue
+            confirmations += 1
+            if confirmations < self.PRECISION_CONFIRMATIONS:
+                continue
+            self._logger.debug(
+                f'  Reached precision ±{rel_margin:.2%} (target ±{precision:.2%}) '
+                f'after {n} rounds ({batches} batches of {batch_size}).',
+                yellow=True,
+            )
+            self._record_precision(stats, rel_margin, batch_size, converged=True)
+            return
+
+        # we ran out of rounds. this means the run was bounded by --benchmark-max-time or
+        # --benchmark-min-rounds instead of by the precision the caller asked for
+        self._record_precision(stats, rel_margin, batch_size, converged=False)
+        achieved = 'unknown' if rel_margin is None else f'±{rel_margin:.2%}'
+        self._logger.warning(
+            f'Benchmark {self.name} stopped at {n} rounds with a margin of error of {achieved}, '
+            f'short of the requested ±{precision:.2%} at {self._confidence:.1%} confidence. ',
+            warner=self._warner,
+        )
 
     def _raw_pedantic(self, target, args=(), kwargs=None, setup=None, teardown=None, rounds=1, warmup_rounds=0, iterations=1):
         if kwargs is None:

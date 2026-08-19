@@ -24,7 +24,18 @@ By default the number of rounds is decided up front:
 as many as fit in ``--benchmark-max-time``, but at least ``--benchmark-min-rounds``.
 
 ``--benchmark-precision`` makes the stopping point adaptive.
-After each round, the relative margin of error of the mean is computed.
-Rounds stop once it falls below the target, so ``--benchmark-precision=0.02`` and ``--benchmark-confidence`` at
+The relative margin of error of the mean is computed as the run goes on in batches of rounds,
+and rounds stop once it falls below the target, so ``--benchmark-precision=0.02`` and ``--benchmark-confidence`` at
 its default 99% means "stop once the true mean is within ±2% of the measured mean, with 99% confidence".
 The usual bounds still apply: never less than ``--benchmark-min-rounds``, never longer than ``--benchmark-max-time``.
+
+Because rounds aren't independent or normally distributed due to machine-level noise, doing a basic
+``stddev/sqrt(rounds)`` doesn't give the correct precision. So, we batch rounds together to get better estimates,
+and we use a Student's t test instead of a normal distribution because we have fewer degrees of freedom due to using
+batches. Due to these properties, there are some results that you should be aware of:
+
+* A run needs at least 21 rounds before it can stop at all, no matter how steady the timings are.
+  21 is derived fromm ``PRECISION_MIN_BATCHES + PRECISION_CONFIRMATIONS - 1``.
+* If ``--benchmark-max-time`` runs out before the target is reached, that benchmark emits a warning
+  instead of silently reporting an unreproducible mean. Raise ``--benchmark-max-time``, loosen
+  ``--benchmark-precision``, or accept that that particular benchmark is noisy.

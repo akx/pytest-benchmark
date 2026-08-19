@@ -382,6 +382,33 @@ def parse_fraction(string):
         return value
 
 
+def t_quantile(p, df):
+    """
+    Quantile of Student's t distribution, via the Cornish-Fisher expansion of the normal quantile.
+
+    We only need this for confidence intervals built from at least a couple dozen batches,
+    and the expansion is good to a few units in the fifth decimal from about ``df=10`` up,
+    so there's no reason to pull in scipy for it.
+    """
+    import statistics
+
+    z = statistics.NormalDist().inv_cdf(p)
+    if df <= 0:
+        raise ValueError('df must be positive')
+    z2 = z * z
+    z3 = z2 * z
+    z5 = z3 * z2
+    z7 = z5 * z2
+    z9 = z7 * z2
+    return (
+        z
+        + (z3 + z) / (4 * df)
+        + (5 * z5 + 16 * z3 + 3 * z) / (96 * df**2)
+        + (3 * z7 + 19 * z5 + 17 * z3 - 15 * z) / (384 * df**3)
+        + (79 * z9 + 776 * z7 + 1482 * z5 - 1920 * z3 - 945 * z) / (92160 * df**4)
+    )
+
+
 def parse_seconds(string):
     try:
         return SecondsDecimal(string).as_string
