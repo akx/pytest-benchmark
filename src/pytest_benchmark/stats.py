@@ -199,6 +199,7 @@ class Metadata:
         self.stats = Stats()
         self.options = options
         self.fixture = fixture
+        self.precision = None
 
     def __bool__(self):
         return bool(self.stats)
@@ -232,6 +233,8 @@ class Metadata:
             'extra_info': self.extra_info,
             'options': {k: funcname(v) if callable(v) else v for k, v in self.options.items()},
         }
+        if self.precision is not None:
+            result['precision'] = self.precision
         if self.cprofile_stats:
             cprofile_list = result['cprofile'] = []
             cprofile_functions = get_cprofile_functions(self.cprofile_stats)
